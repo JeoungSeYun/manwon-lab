@@ -19,6 +19,6 @@ html = html.replace('<head>', `<head>
   .replace('로컬 저장 · API 키 불필요 · 실제 주문 기능 없음', '이 브라우저에만 기록 저장 · API 키 불필요 · 실제 주문 없음');
 fs.writeFileSync(path.join(out, 'index.html'), html);
 for (const file of ['app.js', 'style.css', 'favicon.svg']) fs.copyFileSync(path.join(root, 'public', file), path.join(out, file));
-for (const file of ['engine.mjs', 'browser-runtime.mjs', 'pages-state.mjs']) fs.copyFileSync(path.join(root, file), path.join(out, file));
+for (const file of ['engine.mjs', 'browser-runtime.mjs', 'pages-state.mjs', 'market-universe.mjs']) fs.copyFileSync(path.join(root, file), path.join(out, file));
 fs.writeFileSync(path.join(out, '.nojekyll'), '');
 console.log('GitHub Pages 정적 파일 생성 완료: docs/ (계정·거래 데이터 포함 없음)');

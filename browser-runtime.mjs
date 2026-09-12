@@ -1,5 +1,6 @@
-import { MARKETS, RULES, newState, addEvent, signalFromCandles, valuation, advancePaper, isFresh } from './engine.mjs';
+import { RULES, newState, addEvent, signalFromCandles, valuation, advancePaper, isFresh } from './engine.mjs';
 import { applyPagesAction, tradesCsv, validateSavedState } from './pages-state.mjs';
+import { SCANNER, parseMarkets, rankMarkets, mergeCandles, nextCandleMarket } from './market-universe.mjs';
 
 const STORAGE_KEY = 'manwon-lab-pages-v1';
 const REQUEST_INTERVAL = 12000;
@@ -7,6 +8,8 @@ const REQUEST_INTERVAL = 12000;
 export class BrowserRuntime {
   constructor() {
     this.state = newState(); this.quotes = {}; this.tickers = {}; this.signals = {}; this.candleFetched = {};
+    this.catalog = []; this.scanTickers = {}; this.selection = rankMarkets([], {}); this.candles = {}; this.bootstrapped = {}; this.candleErrors = {};
+    this.catalogFetched = 0; this.tickersFetched = 0; this.nextCatalogAt = 0; this.scanError = ''; this.subscribedKey = '';
     this.readOnly = true; this.feedError = ''; this.storageError = ''; this.offset = 0;
     this.socket = null; this.apiBusy = false; this.nextRequestAt = 0; this.reconnectAt = 0; this.retries = 0;
     this.lastSave = 0; this.lastMessage = 0; this.lastPing = 0; this.timer = null;
@@ -55,13 +58,25 @@ export class BrowserRuntime {
       return false;
     }
   }
+  refreshSelection() {
+    this.selection = rankMarkets(this.catalog, this.scanTickers, [...Object.keys(this.state.paper.positions), ...Object.keys(this.state.manual.positions)]);
+  }
+  scanReady() { return !this.scanError && this.catalogFetched > 0 && Date.now() - this.catalogFetched <= SCANNER.maxAgeMs && Date.now() - this.tickersFetched <= SCANNER.maxAgeMs && this.tickersFetched >= this.catalogFetched; }
+  streamMarkets() { return this.selection.watched.filter(m => this.catalog.some(c => c.code === m.code)); }
+  subscribe(socket) {
+    const codes = this.streamMarkets().map(m => m.code).sort();
+    if (!codes.length) return;
+    socket.send(JSON.stringify([{ ticket: crypto.randomUUID() }, { type: 'ticker', codes }, { type: 'orderbook', codes }, { type: 'candle.1m', codes }, { format: 'DEFAULT' }]));
+    this.subscribedKey = codes.join(',');
+    this.nextRequestAt = Date.now() + REQUEST_INTERVAL;
+  }
   connect() {
     this.nextRequestAt = Date.now() + REQUEST_INTERVAL;
     this.feedError = '업비트 실시간 시세에 연결하는 중입니다.';
     const socket = new WebSocket('wss://api.upbit.com/websocket/v1');
     this.socket = socket; socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
-      socket.send(JSON.stringify([{ ticket: crypto.randomUUID() }, { type: 'ticker', codes: MARKETS.map(m => m.code) }, { type: 'orderbook', codes: MARKETS.map(m => m.code) }, { format: 'DEFAULT' }]));
+      this.subscribe(socket);
       this.lastMessage = Date.now(); this.lastPing = Date.now(); this.retries = 0;
     };
     socket.onmessage = event => {
@@ -70,13 +85,14 @@ export class BrowserRuntime {
         this.lastMessage = Date.now();
         if (data.error) throw new Error(data.error.message || '시세 요청 실패');
         const code = data.code || data.market;
-        if (!MARKETS.some(m => m.code === code)) return;
+        if (!this.streamMarkets().some(m => m.code === code)) return;
         // Realtime stream timestamps provide a bounded estimate of PC clock skew.
         if (Number.isFinite(data.timestamp) && (data.stream_type === 'REALTIME' || data.timestamp > Date.now())) {
           const offset = data.timestamp - Date.now();
           if (Math.abs(offset) < 5 * 60_000) this.offset = Math.round(offset);
         }
         if (data.type === 'ticker') this.tickers[code] = data;
+        if (data.type === 'candle.1m') this.candles[code] = mergeCandles(this.candles[code] || [], [data], this.now());
         if (data.type === 'orderbook') {
           const top = data.orderbook_units?.[0], ticker = this.tickers[code];
           if (!top || !(top.ask_price >= top.bid_price && top.bid_price > 0) || !Number.isFinite(data.timestamp)) return;
@@ -89,24 +105,51 @@ export class BrowserRuntime {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.subscribedKey = ''; this.bootstrapped = {}; this.candleFetched = {};
       this.reconnectAt = Date.now() + Math.min(120000, 15000 * 2 ** Math.min(this.retries++, 3));
       this.feedError = '실시간 연결을 복구하는 중입니다. 오래된 호가로는 모의 체결하지 않습니다.';
     };
   }
-  async fetchCandle(market) {
+  async request(path) {
     this.apiBusy = true; this.nextRequestAt = Date.now() + REQUEST_INTERVAL;
-    this.candleFetched[market] = Date.now();
     try {
-      const response = await fetch(`https://api.upbit.com/v1/candles/minutes/1?market=${encodeURIComponent(market)}&count=45`, { credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(8000) });
+      const response = await fetch(`https://api.upbit.com/v1/${path}`, { credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(8000) });
       if (!response.ok) {
         if (response.status === 418 || response.status === 429) this.nextRequestAt = Date.now() + (response.status === 418 ? 300000 : 60000);
-        throw new Error(`캔들 응답 ${response.status} · 재조회 대기`);
+        throw new Error(`업비트 응답 ${response.status} · 재조회 대기`);
       }
       const data = await response.json();
-      if (!Array.isArray(data)) throw new Error('캔들 형식 오류');
-      this.signals[market] = signalFromCandles(data, this.now());
-    } catch (error) { this.signals[market] = { ready: false, entry: false, reason: error.message }; }
+      if (!Array.isArray(data)) throw new Error('업비트 응답 형식 오류');
+      return data;
+    }
     finally { this.apiBusy = false; }
+  }
+  async fetchCatalog() {
+    this.nextCatalogAt = Date.now() + 60000;
+    try {
+      this.catalog = parseMarkets(await this.request('market/all?is_details=true'));
+      this.catalogFetched = Date.now(); this.nextCatalogAt = Date.now() + SCANNER.refreshMs;
+      this.scanError = ''; this.refreshSelection();
+    } catch (error) { this.scanError = '원화 종목 목록 갱신 실패: ' + error.message; }
+  }
+  async fetchTickers() {
+    try {
+      const rows = await this.request('ticker/all?quote_currencies=KRW');
+      const tickers = Object.fromEntries(rows.filter(t => this.catalog.some(m => m.code === t.market)).map(t => [t.market, t]));
+      if (!Object.keys(tickers).length) throw new Error('원화 거래대금 정보가 없습니다.');
+      this.scanTickers = tickers; this.tickers = { ...tickers }; this.tickersFetched = Date.now(); this.scanError = ''; this.refreshSelection();
+    } catch (error) { this.scanError = '전체 거래대금 갱신 실패: ' + error.message; }
+  }
+  async fetchCandle(market) {
+    this.candleFetched[market] = Date.now();
+    try {
+      const rows = await this.request(`candles/minutes/1?market=${encodeURIComponent(market)}&count=45`);
+      this.candles[market] = mergeCandles(this.candles[market] || [], rows, this.now());
+      this.bootstrapped[market] = true; delete this.candleErrors[market];
+    } catch (error) {
+      this.candleErrors[market] = error.message; this.bootstrapped[market] = false;
+      this.candleFetched[market] = Date.now() - SCANNER.refreshMs + 60000;
+    }
   }
   tick() {
     if (this.readOnly || this.storageError) return;
@@ -114,13 +157,27 @@ export class BrowserRuntime {
     if (this.socket?.readyState === WebSocket.OPEN) {
       if (localNow - this.lastMessage > 45000) this.socket.close();
       else if (localNow - this.lastPing > 30000) { this.socket.send('PING'); this.lastPing = localNow; }
-      if (!this.apiBusy && localNow >= this.nextRequestAt) {
-        const market = MARKETS.find(m => localNow - (this.candleFetched[m.code] || 0) >= 60000);
-        if (market) void this.fetchCandle(market.code);
+    }
+    if (!this.apiBusy && localNow >= this.nextRequestAt) {
+      if (localNow >= this.nextCatalogAt) void this.fetchCatalog();
+      else if (this.catalog.length && this.tickersFetched < this.catalogFetched) void this.fetchTickers();
+      else if (this.streamMarkets().length && !this.socket && localNow >= this.reconnectAt) this.connect();
+      else if (this.socket?.readyState === WebSocket.OPEN) {
+        const key = this.streamMarkets().map(m => m.code).sort().join(',');
+        if (key && key !== this.subscribedKey) this.subscribe(this.socket);
+        else {
+          const code = nextCandleMarket(this.streamMarkets(), this.candleFetched, localNow);
+          if (code) void this.fetchCandle(code);
+        }
       }
-    } else if (!this.socket && !this.apiBusy && localNow >= Math.max(this.nextRequestAt, this.reconnectAt)) this.connect();
+    }
+    for (const m of this.selection.watched) {
+      if (this.bootstrapped[m.code]) this.signals[m.code] = signalFromCandles(this.candles[m.code] || [], now);
+      else this.signals[m.code] = { ready: false, entry: false, reason: this.candleErrors[m.code] || '1분봉 준비 중 · 전체 12종목은 첫 연결 후 약 3분 소요' };
+    }
     const before = this.state.paper.trades.length;
-    advancePaper(this.state, this.quotes, this.signals, now);
+    advancePaper(this.state, this.quotes, this.signals, now, this.scanReady() ? this.selection.watched : []);
+    if (this.state.paper.trades.length !== before) this.refreshSelection();
     if (localNow - this.lastSave >= 10000 || this.state.paper.trades.length !== before) {
       const paper = valuation(this.state.paper, this.quotes, now), manual = valuation(this.state.manual, this.quotes, now);
       this.state.observations.push({ at: now, paper: paper.stale ? null : paper.equity, manual: manual.stale ? null : manual.equity });
@@ -130,12 +187,13 @@ export class BrowserRuntime {
   }
   snapshot() {
     const now = this.now();
-    const fresh = MARKETS.some(m => isFresh(this.quotes[m.code], now));
+    const fresh = this.selection.watched.some(m => isFresh(this.quotes[m.code], now));
     return {
-      app: '만원 실험실', version: '1.1.0-pages', now, token: 'browser-only', rules: RULES, readOnly: this.readOnly,
+      app: '만원 실험실', version: '1.2.0-pages', now, token: 'browser-only', rules: RULES, readOnly: this.readOnly,
       capitalEditable: !this.readOnly && !this.state.capitalLocked && !this.state.control.startedAt && !this.state.paper.trades.length && !this.state.manual.trades.length,
-      feed: { ok: fresh && !this.feedError && !this.storageError, lastSuccess: fresh ? Math.max(...Object.values(this.quotes).map(q => q.at)) : null, error: this.feedError, storageError: this.storageError, refreshing: this.apiBusy, clockOffsetMs: this.offset },
-      markets: MARKETS.map(m => ({ ...m, quote: this.quotes[m.code] ? { ...this.quotes[m.code], ...this.tickers[m.code] && { price: this.tickers[m.code].trade_price, change: this.tickers[m.code].signed_change_rate }, levels: undefined } : null, signal: this.signals[m.code] ?? { ready: false, entry: false, reason: '마감 1분봉 수집 중 · 첫 연결 시 약 1분 소요' } })),
+      feed: { ok: fresh && !this.feedError && !this.storageError, lastSuccess: fresh ? Math.max(...Object.values(this.quotes).map(q => q.at)) : null, error: this.scanError || this.feedError, storageError: this.storageError, refreshing: this.apiBusy, clockOffsetMs: this.offset },
+      universe: { total: this.catalog.length, eligible: this.selection.eligible, excluded: this.selection.excluded, selected: this.selection.selected, ready: this.selection.watched.filter(m => m.selected && this.signals[m.code]?.ready && this.signals[m.code].validUntil >= now).length, updatedAt: this.tickersFetched ? this.tickersFetched + this.offset : null, error: this.scanError, entryPaused: !this.scanReady(), all: this.selection.all },
+      markets: this.selection.watched.map(m => ({ ...m, quote: this.quotes[m.code] ? { ...this.quotes[m.code], ...this.tickers[m.code] && { price: this.tickers[m.code].trade_price, change: this.tickers[m.code].signed_change_rate }, levels: undefined } : null, signal: this.signals[m.code] ?? { ready: false, entry: false, reason: '1분봉 준비 중 · 전체 12종목은 첫 연결 후 약 3분 소요' } })),
       control: this.state.control, paper: valuation(this.state.paper, this.quotes, now), manual: valuation(this.state.manual, this.quotes, now), observations: this.state.observations, events: this.state.events,
     };
   }
@@ -143,8 +201,9 @@ export class BrowserRuntime {
     if (this.readOnly || this.storageError) throw new Error(this.storageError || '다른 탭이 실행 중입니다.');
     const before = structuredClone(this.state);
     try {
-      applyPagesAction(this.state, endpoint, body, this.quotes, this.now());
+      applyPagesAction(this.state, endpoint, body, this.quotes, this.now(), this.catalog);
       if (!this.save()) throw new Error(this.storageError);
+      this.refreshSelection();
     } catch (error) { this.state = before; if (this.storageError) this.state.control.running = false; throw error; }
     return this.snapshot();
   }

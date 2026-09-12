@@ -27,7 +27,16 @@
       <div class="workspace-grid">
         <div class="main-column">
           <section class="panel chart-panel"><div class="panel-heading"><div><p class="eyebrow">EQUITY CURVE</p><h2>자산의 움직임</h2></div><div class="legend"><span class="legend-dot"></span><span id="chart-legend">모의 평가액</span><span class="legend-line"></span>원금</div></div><div class="chart-wrap"><canvas id="chart" aria-label="시간별 원금 대비 평가액 그래프" role="img"></canvas><div id="chart-empty" class="chart-empty">시세를 연결하면 실험 기록이 쌓입니다.</div></div><div class="chart-footer"><span id="chart-start">—</span><span id="chart-caption">실제 수집한 시점만 표시 · 페이지 종료 중에는 기록되지 않습니다.</span><span id="chart-end">—</span></div></section>
-          <section class="panel market-panel"><div class="panel-heading"><div><p class="eyebrow">LIVE MARKET</p><h2>시장 관찰</h2></div><span class="small-label">4개 원화 마켓</span></div><div class="market-cards" id="market-cards"></div><div class="panel-note">신호는 마감된 1분봉으로 계산합니다. 표시된 조건 충족은 수익을 보장하지 않습니다.</div></section>
+          <section class="panel market-panel">
+            <div class="panel-heading"><div><p class="eyebrow">LIVE MARKET</p><h2>시장 관찰</h2></div><span class="small-label" id="market-count">종목 목록 연결 중</span></div>
+            <p class="scanner-summary" id="scanner-summary">시장 정보를 불러오는 중입니다.</p>
+            <div class="market-cards" id="market-cards"></div>
+            <details class="market-directory" id="market-directory" hidden><summary>전체 원화 종목 · 선정 및 제외 사유</summary>
+              <label class="market-search-label" for="market-search">종목 검색</label><input id="market-search" type="search" placeholder="코인 이름 또는 심볼" autocomplete="off">
+              <p class="help" id="directory-count"></p><div class="directory-scroll"><table><thead><tr><th>종목</th><th class="numeric">현재가</th><th class="numeric">24시간 거래대금</th><th>관찰 상태</th></tr></thead><tbody id="directory-rows"></tbody></table></div>
+            </details>
+            <div class="panel-note">신호는 마감된 1분봉으로 계산합니다. 표시된 조건 충족은 수익을 보장하지 않습니다.</div>
+          </section>
           <section class="panel" id="position-panel"><div class="panel-heading"><div><p class="eyebrow">OPEN POSITION</p><h2>현재 보유</h2></div><span class="small-label" id="cash-label">대기 현금 —</span></div><div id="positions" class="positions"></div></section>
           <section class="panel" id="manual-panel" hidden><div class="panel-heading"><div><p class="eyebrow">YOUR ACTUAL FILLS</p><h2>업비트 체결 기록하기</h2></div><a class="text-link" href="https://upbit.com" target="_blank" rel="noopener noreferrer">업비트 열기 ↗</a></div><p class="form-intro">업비트에서 직접 거래한 뒤, 거래 내역의 체결가·수량·수수료를 입력하세요. 입력한 기록을 기준으로 계산하며 거래소와 자동 대조하지 않습니다.</p><form id="fill-form" class="fill-form">
             <label>종목<select name="market" required><option value="KRW-BTC">비트코인 BTC</option><option value="KRW-ETH">이더리움 ETH</option><option value="KRW-XRP">엑스알피 XRP</option><option value="KRW-SOL">솔라나 SOL</option></select></label>

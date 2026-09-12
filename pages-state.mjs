@@ -1,15 +1,15 @@
-import { RULES, newLedger, addEvent, recordFill, closePaper, isFresh } from './engine.mjs';
+import { MARKETS, RULES, newLedger, addEvent, recordFill, closePaper, isFresh, isMarketCode } from './engine.mjs';
 
 export function validateSavedState(state) {
   if (state?.schema !== 1 || !state.control || !Array.isArray(state.observations) || !Array.isArray(state.events)) throw new Error('저장된 장부 형식을 확인할 수 없습니다. 기존 기록을 보존했습니다.');
   for (const ledger of [state.paper, state.manual]) {
     if (!ledger || !Number.isInteger(ledger.initialCapital) || ledger.initialCapital < RULES.minCapital || ledger.initialCapital > RULES.maxCapital || !Number.isFinite(ledger.cash) || ledger.cash < 0 || !Array.isArray(ledger.trades) || !ledger.positions || !Number.isFinite(ledger.realizedPnl) || !Number.isFinite(ledger.totalFees)) throw new Error('저장된 장부의 금액이 올바르지 않습니다. 기존 기록을 보존했습니다.');
-    for (const p of Object.values(ledger.positions)) if (!(p.quantity > 0) || !Number.isFinite(p.quantity) || !(p.cost > 0) || !Number.isFinite(p.cost) || !Number.isFinite(p.openedAt)) throw new Error('저장된 보유 기록을 확인할 수 없습니다.');
+    for (const [code, p] of Object.entries(ledger.positions)) if (!isMarketCode(code) || !(p.quantity > 0) || !Number.isFinite(p.quantity) || !(p.cost > 0) || !Number.isFinite(p.cost) || !Number.isFinite(p.openedAt)) throw new Error('저장된 보유 기록을 확인할 수 없습니다.');
   }
   return state;
 }
 
-export function applyPagesAction(state, endpoint, body, quotes, now) {
+export function applyPagesAction(state, endpoint, body, quotes, now, markets = MARKETS) {
   if (endpoint === '/api/capital') {
     const capital = Number(body.capital);
     if (!Number.isInteger(capital) || capital < RULES.minCapital || capital > RULES.maxCapital || capital % 1000 !== 0) throw new Error('실험 원금은 1만~10만 원 사이, 1,000원 단위로 설정하세요.');
@@ -35,14 +35,15 @@ export function applyPagesAction(state, endpoint, body, quotes, now) {
     if (!Number.isFinite(at) || at < state.createdAt - 365 * 86400_000 || at > now + 60_000) throw new Error('체결 시각을 확인하세요.');
     if (state.manual.trades.length && at < state.manual.trades.at(-1).at) throw new Error('오래된 체결부터 시간순으로 입력하세요.');
     if (typeof body.reference !== 'string' || !body.reference.trim()) throw new Error('체결 입력 ID가 필요합니다.');
-    recordFill(state.manual, { ...body, quantity: Number(body.quantity), price: Number(body.price), fee: Number(body.fee), reason: '사용자 입력 실거래 · 거래소 자동 대조 없음' }, at);
+    recordFill(state.manual, { ...body, quantity: Number(body.quantity), price: Number(body.price), fee: Number(body.fee), reason: '사용자 입력 실거래 · 거래소 자동 대조 없음' }, at, markets);
     state.capitalLocked = true;
     addEvent(state, `${body.market.slice(4)} 실거래 체결 기록`, now);
   } else if (endpoint === '/api/manual/undo') {
     const removed = state.manual.trades.at(-1);
     if (!removed) throw new Error('취소할 입력이 없습니다.');
     const ledger = newLedger(state.manual.initialCapital);
-    for (const trade of state.manual.trades.slice(0, -1)) recordFill(ledger, trade, trade.at).id = trade.id;
+    const historicalMarkets = [...new Set(state.manual.trades.map(t => t.market))].map(code => ({ code }));
+    for (const trade of state.manual.trades.slice(0, -1)) recordFill(ledger, trade, trade.at, historicalMarkets).id = trade.id;
     state.manual = ledger; state.corrections ??= []; state.corrections.push({ at: now, removed });
     addEvent(state, '마지막 입력 취소 · 실제 주문에는 영향 없음', now);
   } else throw new Error('지원하지 않는 동작입니다.');

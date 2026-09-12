@@ -13,7 +13,7 @@ export const RULES = Object.freeze({
   maxEntriesPerDay: 5, quoteMaxAgeMs: 30_000,
   experimentMs: 24 * 60 * 60_000,
 });
-const known = market => MARKETS.some(m => m.code === market);
+export const isMarketCode = market => typeof market === 'string' && /^KRW-[A-Z0-9]{1,20}$/.test(market);
 const positive = value => Number.isFinite(value) && value > 0;
 const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
 const floorQty = q => Math.floor((q + 1e-14) * 1e8) / 1e8;
@@ -93,9 +93,10 @@ export function simulateFill(quote, side, amount, now = Date.now()) {
   return { quantity, notional, price: notional / quantity, fee: notional * RULES.feeRate };
 }
 
-export function recordFill(ledger, input, now = Date.now()) {
+export function recordFill(ledger, input, now = Date.now(), markets = MARKETS) {
   const { side, market, quantity, price, fee } = input;
-  if (!known(market) || !['buy', 'sell'].includes(side)) throw new Error('종목 또는 매매 방향이 올바르지 않습니다.');
+  const known = markets.some(m => m.code === market) || (side === 'sell' && Object.hasOwn(ledger.positions, market));
+  if (!isMarketCode(market) || !known || !['buy', 'sell'].includes(side)) throw new Error('종목 또는 매매 방향이 올바르지 않습니다.');
   if (!positive(quantity) || !positive(price) || !Number.isFinite(fee) || fee < 0) throw new Error('수량·가격은 양수, 수수료는 0 이상이어야 합니다.');
   const notional = quantity * price;
   if (!Number.isFinite(notional) || fee > notional) throw new Error('체결 금액 또는 수수료를 확인하세요.');
@@ -162,7 +163,7 @@ export function closePaper(state, quotes, now = Date.now()) {
   state.control.message = '모의 보유분을 정리했습니다.';
 }
 
-export function advancePaper(state, quotes, signals, now = Date.now()) {
+export function advancePaper(state, quotes, signals, now = Date.now(), markets = MARKETS) {
   const control = state.control;
   const view = valuation(state.paper, quotes, now);
   const expired = control.startedAt !== null && now >= control.startedAt + RULES.experimentMs;
@@ -186,8 +187,8 @@ export function advancePaper(state, quotes, signals, now = Date.now()) {
   if (now - control.lastExitAt < RULES.cooldownMs) { control.message = '다음 진입까지 10분 대기 중입니다.'; return; }
   const entries = state.paper.trades.filter(t => t.side === 'buy' && dayKey(t.at) === dayKey(now)).length;
   if (entries >= RULES.maxEntriesPerDay) { control.message = '오늘의 신규 진입 한도 5회에 도달했습니다.'; return; }
-  const candidates = MARKETS.map(m => ({ market: m.code, signal: signals[m.code], quote: quotes[m.code] }))
-    .filter(c => c.signal?.entry && c.signal.validUntil >= now && isFresh(c.quote, now) && c.quote.spread <= RULES.maxSpread && c.signal.candleAt !== control.lastEntryCandle[c.market])
+  const candidates = markets.filter(m => m.entryEligible !== false).map(m => ({ market: m.code, signal: signals[m.code], quote: quotes[m.code] }))
+    .filter(c => c.signal?.ready && c.signal.entry && c.signal.validUntil >= now && isFresh(c.quote, now) && c.quote.spread >= 0 && c.quote.spread <= RULES.maxSpread && c.signal.candleAt !== control.lastEntryCandle[c.market])
     .sort((a, b) => b.signal.score - a.signal.score);
   if (!candidates.length) { control.message = '진입 조건을 기다립니다. 조건이 없으면 거래하지 않습니다.'; return; }
   const { market, signal, quote } = candidates[0];
@@ -196,7 +197,7 @@ export function advancePaper(state, quotes, signals, now = Date.now()) {
     if (notional < RULES.minOrder) { control.running = false; control.message = '최소 주문액에 필요한 잔액이 부족합니다.'; return; }
     const fill = simulateFill(quote, 'buy', notional, now);
     if (fill.notional < RULES.minOrder) throw new Error('반올림 후 최소 주문액 미달');
-    recordFill(state.paper, { side: 'buy', market, ...fill, reason: 'MA5 > MA20 · 5분 상승률 조건 충족' }, now);
+    recordFill(state.paper, { side: 'buy', market, ...fill, reason: 'MA5 > MA20 · 5분 상승률 조건 충족' }, now, markets);
     control.lastEntryCandle[market] = signal.candleAt;
     control.message = `${market.slice(4)} 모의 보유 중 · 매도 조건 감시`;
     addEvent(state, `${market.slice(4)} 모의 매수 · 총 투입 ${Math.round(fill.notional + fill.fee).toLocaleString('ko-KR')}원`, now);

@@ -43,10 +43,24 @@ function render() {
   $('market-cards').innerHTML = state.markets.map(m => {
     const q = m.quote, s = m.signal, fresh = q && state.now - q.at <= state.rules.quoteMaxAgeMs && !disconnected;
     const ready = s.ready && s.validUntil >= state.now && fresh;
-    const entry = ready && s.entry && q.spread <= state.rules.maxSpread;
-    const label = !fresh ? '시세 대기' : !ready ? '신호 대기' : entry ? '진입 조건 충족' : q.spread > state.rules.maxSpread ? '호가 간격 초과' : '관찰 중';
-    return `<article class="market-card"><div class="coin-header"><span class="coin-icon ${m.symbol}">${{BTC:'₿',ETH:'Ξ',XRP:'×',SOL:'≋'}[m.symbol]}</span><div><div class="coin-symbol">${m.symbol}</div><div class="coin-name">${m.name}</div></div></div><div class="coin-price">₩${q ? won(q.price, q.price < 100 ? 2 : 0) : '—'}</div><div class="coin-change ${q?.change > 0 ? 'positive' : q?.change < 0 ? 'negative' : ''}">${q ? signed(q.change * 100, 2) + '%' : '—'} <span>전일 대비</span></div><div class="coin-signal ${entry ? 'ready' : ''}" title="${esc(s.reason)}">${label}</div><div class="coin-detail">호가 간격 ${q ? won(q.spread * 100, 3) + '%' : '—'}<br>5분 변화 ${ready ? signed(s.momentum * 100, 3) + '%' : '—'}</div></article>`;
-  }).join('');
+    const entry = m.entryEligible !== false && !state.universe?.entryPaused && ready && s.entry && q.spread <= state.rules.maxSpread;
+    const label = m.entryEligible === false ? '보유분 감시' : !fresh ? '시세 대기' : state.universe?.entryPaused ? '후보 정보 확인 중' : !ready ? '신호 대기' : entry ? '진입 조건 충족' : q.spread > state.rules.maxSpread ? '호가 간격 초과' : '관찰 중';
+    const icon = {BTC:'₿',ETH:'Ξ',XRP:'×',SOL:'≋'}[m.symbol] || m.symbol.slice(0, 2);
+    return `<article class="market-card"><div class="coin-header"><span class="coin-icon ${esc(m.symbol)}">${esc(icon)}</span><div><div class="coin-symbol">${esc(m.symbol)}</div><div class="coin-name">${esc(m.name)}</div></div></div><div class="coin-price">₩${q ? won(q.price, q.price < 100 ? 2 : 0) : '—'}</div><div class="coin-change ${q?.change > 0 ? 'positive' : q?.change < 0 ? 'negative' : ''}">${q ? signed(q.change * 100, 2) + '%' : '—'} <span>전일 대비</span></div><div class="coin-signal ${entry ? 'ready' : ''}" title="${esc(m.entryEligible === false ? m.status : s.reason)}">${label}</div><div class="coin-detail">호가 간격 ${q ? won(q.spread * 100, 3) + '%' : '—'}<br>5분 변화 ${ready ? signed(s.momentum * 100, 3) + '%' : '—'}${Number.isFinite(m.volume24h) ? '<br>24h 거래대금 ' + won(m.volume24h / 100000000, 1) + '억 원' : ''}</div></article>`;
+  }).join('') || `<div class="market-loading">${state.universe?.updatedAt ? '현재 필터를 통과한 관찰 종목이 없습니다. 다음 목록 갱신을 기다립니다.' : '업비트 원화 종목과 거래대금을 조회하는 중입니다.'}</div>`;
+  const universe = state.universe;
+  $('market-count').textContent = universe ? `원화 ${universe.total}개 조회 · ${universe.selected}개 정밀 관찰` : `${state.markets.length}개 원화 마켓`;
+  $('scanner-summary').textContent = universe ? `${universe.updatedAt ? '거래대금 상위 ' + universe.selected + '개 · 신호 준비 ' + universe.ready + '/' + universe.selected + ' · 필터 제외 ' + universe.excluded + '개 · ' + clock(universe.updatedAt) + ' 선정' : '전체 원화 종목의 투자유의·주의 여부와 24시간 거래대금을 확인합니다.'} / 5분마다 재선정 · 거래대금 10억 원 이상 · 처음 약 3분 준비` : '마감된 1분봉과 실시간 호가로 진입 조건을 관찰합니다.';
+  $('market-directory').hidden = !universe;
+  if (universe && $('market-directory').open) renderDirectory();
+  const manualMarkets = [...new Map([...(universe?.all || state.markets), ...state.markets].map(m => [m.code, m])).values()];
+  const select = $('fill-form').elements.market, optionsKey = manualMarkets.map(m => m.code).sort().join(',');
+  if (select.dataset.optionsKey !== optionsKey && manualMarkets.length) {
+    const selected = select.value;
+    select.innerHTML = manualMarkets.sort((a, b) => a.symbol.localeCompare(b.symbol)).map(m => `<option value="${esc(m.code)}">${esc(m.name)} ${esc(m.symbol)}</option>`).join('');
+    if (manualMarkets.some(m => m.code === selected)) select.value = selected;
+    select.dataset.optionsKey = optionsKey;
+  }
   $('manual-panel').hidden = !manual;
   $('control-panel').hidden = manual;
   $('export').href = pages ? '#export' : '/api/export?mode=' + mode;
@@ -70,6 +84,13 @@ function render() {
   $('fill-form').querySelector('button[type="submit"]').disabled = busy || disconnected || state.readOnly;
   $('events').innerHTML = state.events.length ? [...state.events].reverse().slice(0, 7).map(e => `<div class="event"><time>${date(e.at)} ${clock(e.at)}</time><p>${esc(e.text)}</p></div>`).join('') : '<p class="help">시작 전입니다. 실험을 시작하면 실행 기록이 남습니다.</p>';
   renderConnection(); renderCountdown(); drawChart();
+}
+
+function renderDirectory() {
+  const query = $('market-search').value.trim().toLocaleLowerCase();
+  const rows = (state?.universe?.all || []).filter(m => `${m.name} ${m.symbol}`.toLocaleLowerCase().includes(query));
+  $('directory-count').textContent = `${rows.length}개 · 현재가와 거래대금은 목록 조회 시점 기준입니다. 정밀 관찰 카드의 시세는 실시간입니다.`;
+  $('directory-rows').innerHTML = rows.map(m => `<tr><td>${esc(m.symbol)}<small>${esc(m.name)}</small></td><td class="numeric">₩${won(m.price, m.price < 100 ? 2 : 0)}</td><td class="numeric">${won(m.volume24h / 100000000, 1)}억 원</td><td class="${m.selected ? 'positive' : ''}">${esc(m.status)}</td></tr>`).join('') || '<tr><td colspan="4">검색 결과가 없습니다.</td></tr>';
 }
 
 function renderConnection() {
@@ -201,6 +222,8 @@ $('undo').addEventListener('click', async () => {
   if (await post('/api/manual/undo', {})) toast('마지막 입력을 취소했습니다. 수정 이력은 보관됩니다.');
 });
 window.addEventListener('resize', drawChart);
+$('market-directory').addEventListener('toggle', () => { if ($('market-directory').open) renderDirectory(); });
+$('market-search').addEventListener('input', renderDirectory);
 if (pages) $('export').addEventListener('click', e => { e.preventDefault(); pages.download(mode); });
 setInterval(renderCountdown, 1000);
 defaultTime(); load();

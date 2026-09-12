@@ -12,9 +12,9 @@ try {
     const timer = setInterval(() => {
       const snapshot = runtime.snapshot();
       if (snapshot.feed.storageError) { clearInterval(timer); reject(new Error(snapshot.feed.storageError)); return; }
-      if (snapshot.markets.every(m => m.quote) && snapshot.markets.every(m => m.signal.ready || m.signal.reason !== '마감 1분봉 수집 중 · 첫 연결 시 약 1분 소요')) {
+      if (snapshot.universe.total > 4 && snapshot.universe.selected > 4 && snapshot.markets.every(m => m.quote) && snapshot.markets.every(m => runtime.bootstrapped[m.code])) {
         clearInterval(timer); resolve();
-      } else if (Date.now() - startedAt > 55000) { clearInterval(timer); reject(new Error('Live quote/candle startup timed out')); }
+      } else if (Date.now() - startedAt > 230000) { clearInterval(timer); reject(new Error('Live quote/candle startup timed out: ' + JSON.stringify({ error: snapshot.feed.error, universe: snapshot.universe.total, selected: snapshot.universe.selected, books: snapshot.markets.filter(m => m.quote).length, prepared: Object.keys(runtime.bootstrapped).length }))); }
     }, 500);
   });
   const snapshot = runtime.snapshot();
@@ -22,5 +22,6 @@ try {
   assert.equal(snapshot.manual.trades.length, 0);
   assert.equal(snapshot.control.running, false);
   assert.ok(snapshot.feed.ok);
-  console.log(JSON.stringify({ ok: true, elapsedSeconds: Math.round((Date.now() - startedAt) / 1000), mode: 'read-only integration check', markets: snapshot.markets.map(m => ({ market: m.code, price: m.quote.price, spreadPct: m.quote.spread * 100, signalReady: m.signal.ready, signal: m.signal.reason })) }, null, 2));
+  assert.ok(Object.values(runtime.candles).some(rows => rows.some(c => c.type === 'candle.1m')), 'WebSocket one-minute candle messages received');
+  console.log(JSON.stringify({ ok: true, elapsedSeconds: Math.round((Date.now() - startedAt) / 1000), mode: 'read-only integration check', universe: { total: snapshot.universe.total, selected: snapshot.universe.selected, excluded: snapshot.universe.excluded }, markets: snapshot.markets.map(m => ({ market: m.code, price: m.quote.price, spreadPct: m.quote.spread * 100, signalReady: m.signal.ready, signal: m.signal.reason })) }, null, 2));
 } finally { events.get('pagehide')?.(); }
