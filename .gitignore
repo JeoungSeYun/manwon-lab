@@ -1,0 +1,9 @@
+data/
+*.log
+*.pid
+.env
+.env.*
+*.zip
+*.tar.gz
+node_modules/
+test-output/
