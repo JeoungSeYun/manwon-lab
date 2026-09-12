@@ -1,3 +1,5 @@
+import { STRATEGIES, strategyProfile, scalpSignal, adaptiveFeedback } from './strategies.mjs';
+export { STRATEGIES } from './strategies.mjs';
 const randomUUID = () => globalThis.crypto.randomUUID();
 
 export const MARKETS = [
@@ -18,6 +20,26 @@ const positive = value => Number.isFinite(value) && value > 0;
 const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
 const floorQty = q => Math.floor((q + 1e-14) * 1e8) / 1e8;
 export const dayKey = now => new Date(now + 9 * 3600_000).toISOString().slice(0, 10);
+export const activeRules = state => ({ ...RULES, ...strategyProfile(state.control.strategy) });
+
+export function setStrategy(state, id, now = Date.now()) {
+  if (!Object.hasOwn(STRATEGIES, id)) throw new Error('지원하지 않는 전략입니다.');
+  if (state.control.locked) throw new Error('종료된 실험의 전략은 변경할 수 없습니다.');
+  if (Object.keys(state.paper.positions).length) throw new Error('모의 보유분을 정리한 뒤 전략을 변경하세요.');
+  state.control.strategy = id;
+  state.control.running = false;
+  state.control.message = `${STRATEGIES[id].name} 적용 · 모의매매 시작 또는 재개를 눌러 실행하세요.`;
+  addEvent(state, `${STRATEGIES[id].name} 모드로 변경 · 기존 기록과 실험 종료 시각 유지`, now);
+}
+
+export function strategyPerformance(ledger) {
+  return Object.values(STRATEGIES).map(profile => {
+    const trades = ledger.trades.filter(t => (t.strategy || 'trend') === profile.id);
+    const closed = trades.filter(t => t.side === 'sell'), wins = closed.filter(t => t.realizedPnl > 0);
+    const pnl = closed.reduce((sum, t) => sum + t.realizedPnl, 0);
+    return { id: profile.id, name: profile.name, closed: closed.length, wins: wins.length, winRate: closed.length ? wins.length / closed.length : null, netPnl: pnl, averageNet: closed.length ? pnl / closed.length : null, fees: trades.reduce((sum, t) => sum + t.fee, 0) };
+  });
+}
 
 export function newLedger(capital = RULES.capital) {
   return { initialCapital: capital, cash: capital, positions: {}, trades: [], realizedPnl: 0, totalFees: 0 };
@@ -25,7 +47,7 @@ export function newLedger(capital = RULES.capital) {
 export function newState(now = Date.now()) {
   return {
     schema: 1, createdAt: now, paper: newLedger(), manual: newLedger(),
-    control: { running: false, startedAt: null, locked: false, message: '모의매매 시작을 누르면 24시간 실험이 시작됩니다.', lastExitAt: 0, lastEntryCandle: {} },
+    control: { strategy: 'trend', running: false, startedAt: null, locked: false, message: '모의매매 시작을 누르면 24시간 실험이 시작됩니다.', lastExitAt: 0, lastEntryCandle: {} },
     observations: [], events: [],
   };
 }
@@ -38,7 +60,8 @@ export function isFresh(quote, now = Date.now()) {
 }
 
 // Only closed, continuous one-minute candles can drive a decision.
-export function signalFromCandles(raw, now = Date.now()) {
+export function signalFromCandles(raw, now = Date.now(), strategy = 'trend') {
+  if (strategy === 'scalp') return scalpSignal(raw, now);
   const candles = raw.map(c => ({ at: Date.parse(c.candle_date_time_utc + 'Z'), price: c.trade_price }))
     .filter(c => Number.isFinite(c.at) && positive(c.price) && c.at + 60_000 <= now)
     .sort((a, b) => a.at - b.at);
@@ -104,7 +127,7 @@ export function recordFill(ledger, input, now = Date.now(), markets = MARKETS) {
   if (reference && ledger.trades.some(t => t.reference === reference)) throw new Error('이미 기록한 체결 ID입니다.');
   if (ledger.trades.length >= 10000) throw new Error('체결 기록 한도에 도달했습니다. CSV를 보관해 주세요.');
   const previous = ledger.positions[market];
-  let realizedPnl = 0;
+  let realizedPnl = 0, returnRate = null;
   if (side === 'buy') {
     if (notional + fee > ledger.cash + 1e-7) throw new Error('수수료를 포함하면 설정한 실험 잔액을 초과합니다.');
     ledger.cash = Math.max(0, ledger.cash - notional - fee);
@@ -118,6 +141,7 @@ export function recordFill(ledger, input, now = Date.now(), markets = MARKETS) {
     const sold = Math.min(quantity, previous.quantity);
     const allocatedCost = previous.cost * (sold / previous.quantity);
     realizedPnl = notional - fee - allocatedCost;
+    returnRate = realizedPnl / allocatedCost;
     ledger.cash += notional - fee;
     const remaining = previous.quantity - sold;
     if (remaining < 1e-12) delete ledger.positions[market];
@@ -125,7 +149,7 @@ export function recordFill(ledger, input, now = Date.now(), markets = MARKETS) {
     ledger.realizedPnl += realizedPnl;
   }
   ledger.totalFees += fee;
-  const trade = { id: randomUUID(), reference, at: now, side, market, quantity, price, notional, fee, realizedPnl, reason: String(input.reason ?? '').slice(0, 160) };
+  const trade = { id: randomUUID(), reference, at: now, side, market, quantity, price, notional, fee, realizedPnl, returnRate, reason: String(input.reason ?? '').slice(0, 160), ...(input.strategy && Object.hasOwn(STRATEGIES, input.strategy) ? { strategy: input.strategy } : {}) };
   ledger.trades.push(trade);
   return trade;
 }
@@ -152,7 +176,7 @@ function paperExit(state, market, quote, reason, now) {
   const position = state.paper.positions[market];
   const fill = simulateFill(quote, 'sell', position.quantity, now);
   if (fill.notional < RULES.minOrder) throw new Error('평가금액이 최소 주문액 5,000원 미만입니다. 모의 매도 불가 상태로 보존합니다.');
-  recordFill(state.paper, { side: 'sell', market, ...fill, reason }, now);
+  recordFill(state.paper, { side: 'sell', market, ...fill, reason, strategy: position.strategy || 'trend' }, now);
   state.control.lastExitAt = now;
   addEvent(state, `${market.slice(4)} 모의 매도 · ${reason}`, now);
 }
@@ -165,6 +189,7 @@ export function closePaper(state, quotes, now = Date.now()) {
 
 export function advancePaper(state, quotes, signals, now = Date.now(), markets = MARKETS) {
   const control = state.control;
+  const rules = activeRules(state);
   const view = valuation(state.paper, quotes, now);
   const expired = control.startedAt !== null && now >= control.startedAt + RULES.experimentMs;
   if (expired || (view.complete && !view.stale && view.pnl <= -state.paper.initialCapital * RULES.lossRatio)) {
@@ -179,27 +204,40 @@ export function advancePaper(state, quotes, signals, now = Date.now(), markets =
       const fill = simulateFill(quote, 'sell', position.quantity, now);
       const ret = (fill.notional - fill.fee) / position.cost - 1;
       const signal = signals[market];
-      const reason = control.locked ? control.message : ret <= -RULES.stopLoss ? '순손익 -1% 손절' : ret >= RULES.takeProfit ? '순손익 +1.8% 익절' : now - position.openedAt >= RULES.maxHoldMs ? '보유 30분 경과' : signal?.ready && signal.validUntil >= now && signal.exit ? '이동평균 추세 이탈' : null;
+      const exitRules = { ...RULES, ...strategyProfile(position.strategy || 'trend') };
+      position.peakNetReturn = Math.max(position.peakNetReturn ?? ret, ret);
+      const trailing = exitRules.trailingActivation !== null && position.peakNetReturn >= exitRules.trailingActivation && position.peakNetReturn - ret >= exitRules.trailingDistance;
+      const reason = control.locked ? control.message : ret <= -exitRules.stopLoss ? `순손익 -${(exitRules.stopLoss * 100).toFixed(1)}% 손절` : ret >= exitRules.takeProfit ? `순손익 +${(exitRules.takeProfit * 100).toFixed(1)}% 익절` : trailing ? `수익 고점에서 ${(exitRules.trailingDistance * 100).toFixed(1)}%p 하락 · 추적 청산` : now - position.openedAt >= exitRules.maxHoldMs ? `보유 ${exitRules.maxHoldMs / 60000}분 경과` : signal?.ready && signal.validUntil >= now && signal.exit ? '이동평균 추세 이탈' : null;
       if (reason) paperExit(state, market, quote, reason, now);
     } catch (error) { control.message = error.message; }
   }
   if (!control.running || control.locked || Object.keys(state.paper.positions).length) return;
-  if (now - control.lastExitAt < RULES.cooldownMs) { control.message = '다음 진입까지 10분 대기 중입니다.'; return; }
+  const feedback = control.strategy === 'scalp' ? adaptiveFeedback(state.paper.trades, now) : null;
+  if (feedback?.paused) { control.message = `단타 3회 연속 손실 · 신규 진입 ${Math.ceil((feedback.pauseUntil - now) / 60000)}분 대기`; return; }
+  if (now - control.lastExitAt < rules.cooldownMs) { control.message = `다음 진입까지 ${Math.ceil((control.lastExitAt + rules.cooldownMs - now) / 1000)}초 대기 중입니다.`; return; }
   const entries = state.paper.trades.filter(t => t.side === 'buy' && dayKey(t.at) === dayKey(now)).length;
-  if (entries >= RULES.maxEntriesPerDay) { control.message = '오늘의 신규 진입 한도 5회에 도달했습니다.'; return; }
+  if (entries >= rules.maxEntriesPerDay) { control.message = `오늘의 신규 진입 한도 ${rules.maxEntriesPerDay}회에 도달했습니다.`; return; }
   const candidates = markets.filter(m => m.entryEligible !== false).map(m => ({ market: m.code, signal: signals[m.code], quote: quotes[m.code] }))
-    .filter(c => c.signal?.ready && c.signal.entry && c.signal.validUntil >= now && isFresh(c.quote, now) && c.quote.spread >= 0 && c.quote.spread <= RULES.maxSpread && c.signal.candleAt !== control.lastEntryCandle[c.market])
-    .sort((a, b) => b.signal.score - a.signal.score);
+    .filter(c => c.signal?.ready && c.signal.entry && c.signal.validUntil >= now && isFresh(c.quote, now) && c.quote.spread >= 0 && c.quote.spread <= rules.maxSpread && c.signal.candleAt !== control.lastEntryCandle[c.market])
+    .filter(c => !feedback?.markets[c.market]?.paused)
+    .sort((a, b) => b.signal.score * (feedback?.markets[b.market]?.multiplier ?? 1) - a.signal.score * (feedback?.markets[a.market]?.multiplier ?? 1));
   if (!candidates.length) { control.message = '진입 조건을 기다립니다. 조건이 없으면 거래하지 않습니다.'; return; }
-  const { market, signal, quote } = candidates[0];
-  try {
+  for (const { market, signal, quote } of candidates) try {
     const notional = Math.min(state.paper.initialCapital * RULES.investmentRatio, state.paper.cash) / (1 + RULES.feeRate);
     if (notional < RULES.minOrder) { control.running = false; control.message = '최소 주문액에 필요한 잔액이 부족합니다.'; return; }
     const fill = simulateFill(quote, 'buy', notional, now);
     if (fill.notional < RULES.minOrder) throw new Error('반올림 후 최소 주문액 미달');
-    recordFill(state.paper, { side: 'buy', market, ...fill, reason: 'MA5 > MA20 · 5분 상승률 조건 충족' }, now, markets);
+    if (rules.maxChase !== null && (!positive(signal.lastClose) || !positive(signal.priorHigh) || !positive(quote.bid) || fill.price > signal.lastClose * (1 + rules.maxChase) || quote.bid < signal.priorHigh)) throw new Error('돌파 가격 이탈 또는 신호 이후 0.4% 초과 상승 · 추격 진입 보류');
+    if (rules.maxRoundTripCost !== null) {
+      const exit = simulateFill(quote, 'sell', fill.quantity, now);
+      const roundTripCost = 1 - (exit.notional - exit.fee) / (fill.notional + fill.fee);
+      if (roundTripCost > rules.maxRoundTripCost) throw new Error('예상 왕복 비용 0.35% 초과 · 단타 진입 보류');
+    }
+    recordFill(state.paper, { side: 'buy', market, ...fill, reason: control.strategy === 'scalp' ? '거래량 증가 · 5분 고점 돌파' : 'MA5 > MA20 · 5분 상승률 조건 충족', strategy: rules.id }, now, markets);
+    state.paper.positions[market].strategy = rules.id;
     control.lastEntryCandle[market] = signal.candleAt;
     control.message = `${market.slice(4)} 모의 보유 중 · 매도 조건 감시`;
     addEvent(state, `${market.slice(4)} 모의 매수 · 총 투입 ${Math.round(fill.notional + fill.fee).toLocaleString('ko-KR')}원`, now);
+    return;
   } catch (error) { control.message = error.message; }
 }

@@ -1,4 +1,5 @@
-import { RULES, newState, addEvent, signalFromCandles, valuation, advancePaper, isFresh } from './engine.mjs';
+import { RULES, STRATEGIES, activeRules, strategyPerformance, newState, addEvent, signalFromCandles, valuation, advancePaper, isFresh } from './engine.mjs';
+import { adaptiveFeedback } from './strategies.mjs';
 import { applyPagesAction, tradesCsv, validateSavedState } from './pages-state.mjs';
 import { SCANNER, parseMarkets, rankMarkets, mergeCandles, nextCandleMarket } from './market-universe.mjs';
 
@@ -8,6 +9,7 @@ const REQUEST_INTERVAL = 12000;
 export class BrowserRuntime {
   constructor() {
     this.state = newState(); this.quotes = {}; this.tickers = {}; this.signals = {}; this.candleFetched = {};
+    this.state.control.strategy = 'scalp';
     this.catalog = []; this.scanTickers = {}; this.selection = rankMarkets([], {}); this.candles = {}; this.bootstrapped = {}; this.candleErrors = {};
     this.catalogFetched = 0; this.tickersFetched = 0; this.nextCatalogAt = 0; this.scanError = ''; this.subscribedKey = '';
     this.readOnly = true; this.feedError = ''; this.storageError = ''; this.offset = 0;
@@ -59,7 +61,7 @@ export class BrowserRuntime {
     }
   }
   refreshSelection() {
-    this.selection = rankMarkets(this.catalog, this.scanTickers, [...Object.keys(this.state.paper.positions), ...Object.keys(this.state.manual.positions)]);
+    this.selection = rankMarkets(this.catalog, this.scanTickers, [...Object.keys(this.state.paper.positions), ...Object.keys(this.state.manual.positions)], this.state.control.strategy);
   }
   scanReady() { return !this.scanError && this.catalogFetched > 0 && Date.now() - this.catalogFetched <= SCANNER.maxAgeMs && Date.now() - this.tickersFetched <= SCANNER.maxAgeMs && this.tickersFetched >= this.catalogFetched; }
   streamMarkets() { return this.selection.watched.filter(m => this.catalog.some(c => c.code === m.code)); }
@@ -172,7 +174,7 @@ export class BrowserRuntime {
       }
     }
     for (const m of this.selection.watched) {
-      if (this.bootstrapped[m.code]) this.signals[m.code] = signalFromCandles(this.candles[m.code] || [], now);
+      if (this.bootstrapped[m.code]) this.signals[m.code] = signalFromCandles(this.candles[m.code] || [], now, this.state.control.strategy);
       else this.signals[m.code] = { ready: false, entry: false, reason: this.candleErrors[m.code] || '1분봉 준비 중 · 전체 12종목은 첫 연결 후 약 3분 소요' };
     }
     const before = this.state.paper.trades.length;
@@ -189,10 +191,10 @@ export class BrowserRuntime {
     const now = this.now();
     const fresh = this.selection.watched.some(m => isFresh(this.quotes[m.code], now));
     return {
-      app: '만원 실험실', version: '1.2.0-pages', now, token: 'browser-only', rules: RULES, readOnly: this.readOnly,
+      app: '만원 실험실', version: '1.3.0-pages', now, token: 'browser-only', rules: activeRules(this.state), strategies: Object.values(STRATEGIES), performance: strategyPerformance(this.state.paper), feedback: adaptiveFeedback(this.state.paper.trades, now), readOnly: this.readOnly,
       capitalEditable: !this.readOnly && !this.state.capitalLocked && !this.state.control.startedAt && !this.state.paper.trades.length && !this.state.manual.trades.length,
       feed: { ok: fresh && !this.feedError && !this.storageError, lastSuccess: fresh ? Math.max(...Object.values(this.quotes).map(q => q.at)) : null, error: this.scanError || this.feedError, storageError: this.storageError, refreshing: this.apiBusy, clockOffsetMs: this.offset },
-      universe: { total: this.catalog.length, eligible: this.selection.eligible, excluded: this.selection.excluded, selected: this.selection.selected, ready: this.selection.watched.filter(m => m.selected && this.signals[m.code]?.ready && this.signals[m.code].validUntil >= now).length, updatedAt: this.tickersFetched ? this.tickersFetched + this.offset : null, error: this.scanError, entryPaused: !this.scanReady(), all: this.selection.all },
+      universe: { total: this.catalog.length, selectionLabel: this.state.control.strategy === 'scalp' ? '거래대금 6개 + 변동폭 반영 6개' : '거래대금', eligible: this.selection.eligible, excluded: this.selection.excluded, selected: this.selection.selected, ready: this.selection.watched.filter(m => m.selected && this.signals[m.code]?.ready && this.signals[m.code].validUntil >= now).length, updatedAt: this.tickersFetched ? this.tickersFetched + this.offset : null, error: this.scanError, entryPaused: !this.scanReady(), all: this.selection.all },
       markets: this.selection.watched.map(m => ({ ...m, quote: this.quotes[m.code] ? { ...this.quotes[m.code], ...this.tickers[m.code] && { price: this.tickers[m.code].trade_price, change: this.tickers[m.code].signed_change_rate }, levels: undefined } : null, signal: this.signals[m.code] ?? { ready: false, entry: false, reason: '1분봉 준비 중 · 전체 12종목은 첫 연결 후 약 3분 소요' } })),
       control: this.state.control, paper: valuation(this.state.paper, this.quotes, now), manual: valuation(this.state.manual, this.quotes, now), observations: this.state.observations, events: this.state.events,
     };
@@ -204,6 +206,9 @@ export class BrowserRuntime {
       applyPagesAction(this.state, endpoint, body, this.quotes, this.now(), this.catalog);
       if (!this.save()) throw new Error(this.storageError);
       this.refreshSelection();
+      if (endpoint === '/api/strategy') {
+        for (const m of this.selection.watched) this.signals[m.code] = this.bootstrapped[m.code] ? signalFromCandles(this.candles[m.code] || [], this.now(), this.state.control.strategy) : { ready: false, entry: false, reason: '전략 변경 · 캔들 준비 중' };
+      }
     } catch (error) { this.state = before; if (this.storageError) this.state.control.running = false; throw error; }
     return this.snapshot();
   }

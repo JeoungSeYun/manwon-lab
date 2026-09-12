@@ -37,7 +37,8 @@ test('Pages artifact is subpath-safe and contains only static site assets', () =
   assert.ok(html.includes('type="module"'));
   assert.ok(!/(href|src)="\//.test(html));
   for (const file of ['app.js', 'style.css', 'favicon.svg', 'engine.mjs', 'pages-state.mjs', 'browser-runtime.mjs', 'market-universe.mjs', '.nojekyll']) assert.ok(fs.existsSync(new URL(file, folder)));
-  assert.equal(fs.readdirSync(folder).length, 9);
+  assert.ok(fs.existsSync(new URL('strategies.mjs', folder)));
+  assert.equal(fs.readdirSync(folder).length, 10);
   assert.ok(!fs.readFileSync(new URL('engine.mjs', folder), 'utf8').includes('node:'));
   assert.ok(fs.readFileSync(new URL('browser-runtime.mjs', folder), 'utf8').includes('wss://api.upbit.com/websocket/v1'));
 });

@@ -39,6 +39,11 @@ test('HTTP budget limits, same-origin writes, ledger persistence, duplicate prev
     assert.equal(badHostStatus, 403);
     assert.equal((await post('/api/capital', { capital: 30000 }, { Origin: 'https://evil.example' })).status, 403);
     assert.equal((await post('/api/capital', { capital: 30000 }, { 'X-Lab-Token': '' })).status, 403);
+    assert.equal((await post('/api/strategy', { strategy: 'scalp' }, { Origin: 'https://evil.example' })).status, 403);
+    assert.equal((await post('/api/strategy', { strategy: 'toString' })).status, 400);
+    const strategy = await post('/api/strategy', { strategy: 'scalp' });
+    assert.equal(strategy.status, 200); assert.equal(strategy.body.rules.maxHoldMs, 300000);
+    assert.equal(strategy.body.control.running, false); assert.equal(strategy.body.feedback.samples, 0);
     for (const capital of [0, 9999, 100001, 110000, 10000.5]) assert.equal((await post('/api/capital', { capital })).status, 400);
     let result = await post('/api/capital', { capital: 100000 });
     assert.equal(result.status, 200); assert.equal(result.body.paper.initialCapital, 100000); assert.equal(result.body.manual.cash, 100000);
@@ -55,6 +60,7 @@ test('HTTP budget limits, same-origin writes, ledger persistence, duplicate prev
     const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'experiment.json'), 'utf8'));
     assert.equal(persisted.manual.trades.length, 1);
     await stop(); state = await launch();
+    assert.equal(state.control.strategy, 'scalp'); assert.equal(state.rules.maxEntriesPerDay, 30);
     assert.equal(state.manual.cash, 23997); assert.equal(state.manual.trades.length, 1); assert.equal(state.control.running, false);
     result = await post('/api/manual/undo', {});
     assert.equal(result.status, 200); assert.equal(result.body.manual.cash, 30000); assert.equal(result.body.manual.trades.length, 0);

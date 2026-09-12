@@ -1,10 +1,11 @@
-import { MARKETS, RULES, newLedger, addEvent, recordFill, closePaper, isFresh, isMarketCode } from './engine.mjs';
+import { MARKETS, RULES, STRATEGIES, setStrategy, newLedger, addEvent, recordFill, closePaper, isFresh, isMarketCode } from './engine.mjs';
 
 export function validateSavedState(state) {
   if (state?.schema !== 1 || !state.control || !Array.isArray(state.observations) || !Array.isArray(state.events)) throw new Error('저장된 장부 형식을 확인할 수 없습니다. 기존 기록을 보존했습니다.');
+  if (state.control.strategy !== undefined && !Object.hasOwn(STRATEGIES, state.control.strategy)) throw new Error('저장된 전략 설정을 확인할 수 없습니다.');
   for (const ledger of [state.paper, state.manual]) {
     if (!ledger || !Number.isInteger(ledger.initialCapital) || ledger.initialCapital < RULES.minCapital || ledger.initialCapital > RULES.maxCapital || !Number.isFinite(ledger.cash) || ledger.cash < 0 || !Array.isArray(ledger.trades) || !ledger.positions || !Number.isFinite(ledger.realizedPnl) || !Number.isFinite(ledger.totalFees)) throw new Error('저장된 장부의 금액이 올바르지 않습니다. 기존 기록을 보존했습니다.');
-    for (const [code, p] of Object.entries(ledger.positions)) if (!isMarketCode(code) || !(p.quantity > 0) || !Number.isFinite(p.quantity) || !(p.cost > 0) || !Number.isFinite(p.cost) || !Number.isFinite(p.openedAt)) throw new Error('저장된 보유 기록을 확인할 수 없습니다.');
+    for (const [code, p] of Object.entries(ledger.positions)) if (!isMarketCode(code) || !(p.quantity > 0) || !Number.isFinite(p.quantity) || !(p.cost > 0) || !Number.isFinite(p.cost) || !Number.isFinite(p.openedAt) || (p.strategy !== undefined && !Object.hasOwn(STRATEGIES, p.strategy)) || (p.peakNetReturn !== undefined && !Number.isFinite(p.peakNetReturn))) throw new Error('저장된 보유 기록을 확인할 수 없습니다.');
   }
   return state;
 }
@@ -17,6 +18,8 @@ export function applyPagesAction(state, endpoint, body, quotes, now, markets = M
     state.paper = newLedger(capital); state.manual = newLedger(capital);
     state.observations = [{ at: now, paper: capital, manual: capital }];
     addEvent(state, `실험 원금 ${capital.toLocaleString('ko-KR')}원으로 설정`, now);
+  } else if (endpoint === '/api/strategy') {
+    setStrategy(state, body.strategy, now);
   } else if (endpoint === '/api/control') {
     if (body.action === 'start') {
       if (state.control.locked || (state.control.startedAt && now >= state.control.startedAt + RULES.experimentMs)) throw new Error('이 24시간 실험은 종료되었습니다.');
@@ -55,7 +58,7 @@ export function tradesCsv(ledger, mode) {
     if (/^[=+@\t\r]/.test(text) || (text.startsWith('-') && !Number.isFinite(Number(text)))) text = "'" + text;
     return '"' + text.replaceAll('"', '""') + '"';
   };
-  const header = ['구분', '시각', '종목', '매매', '수량', '체결가', '거래금액', '수수료', '실현손익', '체결ID'];
-  const rows = ledger.trades.map(t => [mode === 'manual' ? '사용자 입력 실거래' : '모의거래', new Date(t.at).toISOString(), t.market, t.side, t.quantity, t.price, t.notional, t.fee, t.realizedPnl, t.reference]);
+  const header = ['구분', '시각', '종목', '매매', '수량', '체결가', '거래금액', '수수료', '실현손익', '체결ID', '전략', '체결사유'];
+  const rows = ledger.trades.map(t => [mode === 'manual' ? '사용자 입력 실거래' : '모의거래', new Date(t.at).toISOString(), t.market, t.side, t.quantity, t.price, t.notional, t.fee, t.realizedPnl, t.reference, mode === 'manual' ? '수동 기록' : STRATEGIES[t.strategy || 'trend']?.name || '미확인', t.reason]);
   return '\uFEFF' + [header, ...rows].map(row => row.map(cell).join(',')).join('\r\n');
 }

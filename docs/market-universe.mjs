@@ -24,17 +24,26 @@ export function parseMarkets(raw) {
   return [...unique.values()];
 }
 
-export function rankMarkets(catalog, tickers, heldCodes = []) {
+export function rankMarkets(catalog, tickers, heldCodes = [], strategy = 'trend') {
   const ranked = catalog.map(m => {
     const t = tickers[m.code], volume24h = t?.acc_trade_price_24h;
     const reasons = [...m.reasons];
     if (!Number.isFinite(volume24h) || !(t?.trade_price > 0)) reasons.push('거래대금 정보 미확인');
     else if (volume24h < SCANNER.minVolume24h) reasons.push('24시간 거래대금 10억 원 미만');
-    return { ...m, reasons, volume24h: Number.isFinite(volume24h) ? volume24h : 0, price: t?.trade_price ?? null, change: t?.signed_change_rate ?? null };
+    const dayRange = Number.isFinite(t?.high_price) && Number.isFinite(t?.low_price) && t.low_price > 0 && t.high_price >= t.low_price ? (t.high_price - t.low_price) / t.low_price : 0;
+    return { ...m, reasons, dayRange, volume24h: Number.isFinite(volume24h) ? volume24h : 0, price: t?.trade_price ?? null, change: t?.signed_change_rate ?? null };
   }).sort((a, b) => b.volume24h - a.volume24h || a.code.localeCompare(b.code));
-  const selected = new Set(ranked.filter(m => !m.reasons.length).slice(0, SCANNER.limit).map(m => m.code));
+  const pool = ranked.filter(m => !m.reasons.length).slice(0, strategy === 'scalp' ? 60 : ranked.length);
+  const liquidCore = strategy === 'scalp' ? pool.slice(0, 6).map(m => m.code) : [];
+  if (strategy === 'scalp') {
+    const largest = pool[0]?.volume24h || 1;
+    for (const m of pool) m.selectionScore = .45 * Math.log1p(m.volume24h) / Math.log1p(largest) + .55 * Math.min(m.dayRange / .15, 1);
+    pool.sort((a, b) => b.selectionScore - a.selectionScore || b.volume24h - a.volume24h);
+  }
+  const selected = new Set(liquidCore);
+  for (const m of pool) { if (selected.size >= SCANNER.limit) break; selected.add(m.code); }
   const held = new Set(heldCodes.filter(isMarketCode));
-  const all = ranked.map(m => ({ ...m, selected: selected.has(m.code), held: held.has(m.code), entryEligible: selected.has(m.code), status: m.reasons.length ? m.reasons.join(' · ') : selected.has(m.code) ? '정밀 관찰' : '거래대금 순위 대기' }));
+  const all = ranked.map(m => ({ ...m, selected: selected.has(m.code), held: held.has(m.code), entryEligible: selected.has(m.code), status: m.reasons.length ? m.reasons.join(' · ') : selected.has(m.code) ? '정밀 관찰' : strategy === 'scalp' ? '단타 후보 순위 대기' : '거래대금 순위 대기' }));
   const watched = all.filter(m => m.selected || m.held);
   for (const code of held) if (!all.some(m => m.code === code)) watched.push({ code, symbol: code.slice(4), name: code.slice(4), selected: false, held: true, entryEligible: false, reasons: ['현재 원화 목록에 없음'], status: '보유 기록 · 현재 원화 목록에 없음' });
   return { all, watched, selected: selected.size, eligible: ranked.filter(m => !m.reasons.length).length, excluded: ranked.filter(m => m.reasons.length).length };

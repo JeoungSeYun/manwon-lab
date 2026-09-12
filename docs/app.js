@@ -21,6 +21,7 @@ function defaultTime() {
 function render() {
   if (!state) return;
   const ledger = state[mode], manual = mode === 'manual', control = state.control;
+  const scalp = (control.strategy || 'trend') === 'scalp';
   $('tab-paper').classList.toggle('active', !manual); $('tab-paper').setAttribute('aria-selected', String(!manual));
   $('tab-manual').classList.toggle('active', manual); $('tab-manual').setAttribute('aria-selected', String(manual));
   $('mode-description').textContent = manual ? '사용자 입력 체결 · 거래소 자동 대조 없음' : '실시간 시세 · 가상 자금 · 실제 주문 없음';
@@ -43,14 +44,16 @@ function render() {
   $('market-cards').innerHTML = state.markets.map(m => {
     const q = m.quote, s = m.signal, fresh = q && state.now - q.at <= state.rules.quoteMaxAgeMs && !disconnected;
     const ready = s.ready && s.validUntil >= state.now && fresh;
-    const entry = m.entryEligible !== false && !state.universe?.entryPaused && ready && s.entry && q.spread <= state.rules.maxSpread;
-    const label = m.entryEligible === false ? '보유분 감시' : !fresh ? '시세 대기' : state.universe?.entryPaused ? '후보 정보 확인 중' : !ready ? '신호 대기' : entry ? '진입 조건 충족' : q.spread > state.rules.maxSpread ? '호가 간격 초과' : '관찰 중';
+    const feedback = scalp ? state.feedback?.markets[m.code] : null;
+    const paused = scalp && (state.feedback?.paused || feedback?.paused);
+    const entry = !paused && m.entryEligible !== false && !state.universe?.entryPaused && ready && s.entry && q.spread <= state.rules.maxSpread;
+    const label = m.entryEligible === false ? '보유분 감시' : !fresh ? '시세 대기' : paused ? '연속 손실 대기' : state.universe?.entryPaused ? '후보 정보 확인 중' : !ready ? '신호 대기' : entry ? '진입 후보 · 비용 확인' : q.spread > state.rules.maxSpread ? '호가 간격 초과' : '관찰 중';
     const icon = {BTC:'₿',ETH:'Ξ',XRP:'×',SOL:'≋'}[m.symbol] || m.symbol.slice(0, 2);
-    return `<article class="market-card"><div class="coin-header"><span class="coin-icon ${esc(m.symbol)}">${esc(icon)}</span><div><div class="coin-symbol">${esc(m.symbol)}</div><div class="coin-name">${esc(m.name)}</div></div></div><div class="coin-price">₩${q ? won(q.price, q.price < 100 ? 2 : 0) : '—'}</div><div class="coin-change ${q?.change > 0 ? 'positive' : q?.change < 0 ? 'negative' : ''}">${q ? signed(q.change * 100, 2) + '%' : '—'} <span>전일 대비</span></div><div class="coin-signal ${entry ? 'ready' : ''}" title="${esc(m.entryEligible === false ? m.status : s.reason)}">${label}</div><div class="coin-detail">호가 간격 ${q ? won(q.spread * 100, 3) + '%' : '—'}<br>5분 변화 ${ready ? signed(s.momentum * 100, 3) + '%' : '—'}${Number.isFinite(m.volume24h) ? '<br>24h 거래대금 ' + won(m.volume24h / 100000000, 1) + '억 원' : ''}</div></article>`;
+    return `<article class="market-card"><div class="coin-header"><span class="coin-icon ${esc(m.symbol)}">${esc(icon)}</span><div><div class="coin-symbol">${esc(m.symbol)}</div><div class="coin-name">${esc(m.name)}</div></div></div><div class="coin-price">₩${q ? won(q.price, q.price < 100 ? 2 : 0) : '—'}</div><div class="coin-change ${q?.change > 0 ? 'positive' : q?.change < 0 ? 'negative' : ''}">${q ? signed(q.change * 100, 2) + '%' : '—'} <span>전일 대비</span></div><div class="coin-signal ${entry ? 'ready' : ''}" title="${esc(m.entryEligible === false ? m.status : s.reason)}">${label}</div><div class="coin-detail">호가 간격 ${q ? won(q.spread * 100, 3) + '%' : '—'}<br>${scalp ? '3' : '5'}분 변화 ${ready ? signed(s.momentum * 100, 3) + '%' : '—'}${scalp ? '<br>거래량 ' + (ready ? won(s.volumeRatio, 2) + '배' : '준비 중') + '<br>피드백 ×' + won(feedback?.multiplier ?? 1, 2) + ' · ' + (feedback?.samples ?? 0) + '회' : ''}${Number.isFinite(m.volume24h) ? '<br>24h 거래대금 ' + won(m.volume24h / 100000000, 1) + '억 원' : ''}</div>${scalp && s.checks ? '<div class="signal-checks">' + s.checks.map(c => `<span class="${c.passed ? 'positive' : ''}">${c.passed ? '✓' : '·'} ${esc(c.label)}</span>`).join('') + '</div>' : ''}</article>`;
   }).join('') || `<div class="market-loading">${state.universe?.updatedAt ? '현재 필터를 통과한 관찰 종목이 없습니다. 다음 목록 갱신을 기다립니다.' : '업비트 원화 종목과 거래대금을 조회하는 중입니다.'}</div>`;
   const universe = state.universe;
   $('market-count').textContent = universe ? `원화 ${universe.total}개 조회 · ${universe.selected}개 정밀 관찰` : `${state.markets.length}개 원화 마켓`;
-  $('scanner-summary').textContent = universe ? `${universe.updatedAt ? '거래대금 상위 ' + universe.selected + '개 · 신호 준비 ' + universe.ready + '/' + universe.selected + ' · 필터 제외 ' + universe.excluded + '개 · ' + clock(universe.updatedAt) + ' 선정' : '전체 원화 종목의 투자유의·주의 여부와 24시간 거래대금을 확인합니다.'} / 5분마다 재선정 · 거래대금 10억 원 이상 · 처음 약 3분 준비` : '마감된 1분봉과 실시간 호가로 진입 조건을 관찰합니다.';
+  $('scanner-summary').textContent = universe ? `${universe.updatedAt ? (universe.selectionLabel || '거래대금') + ' 기준 ' + universe.selected + '개 · 신호 준비 ' + universe.ready + '/' + universe.selected + ' · 필터 제외 ' + universe.excluded + '개 · ' + clock(universe.updatedAt) + ' 선정' : '전체 원화 종목의 투자유의·주의 여부와 24시간 거래대금을 확인합니다.'} / 5분마다 재선정 · 거래대금 10억 원 이상 · 처음 약 3분 준비` : '마감된 1분봉과 실시간 호가로 진입 조건을 관찰합니다.';
   $('market-directory').hidden = !universe;
   if (universe && $('market-directory').open) renderDirectory();
   const manualMarkets = [...new Map([...(universe?.all || state.markets), ...state.markets].map(m => [m.code, m])).values()];
@@ -70,6 +73,7 @@ function render() {
   $('trades').innerHTML = [...ledger.trades].reverse().slice(0, 100).map(t => `<tr title="${esc(t.reason)}"><td>${clock(t.at)}<small>${date(t.at)}</small></td><td>${esc(t.market.slice(4))}<span class="trade-side ${t.side}">${t.side === 'buy' ? '매수' : '매도'}</span><small>${won(t.quantity, 8)}개</small></td><td class="numeric">${won(t.notional, 2)}원<small>@ ${won(t.price, 2)}</small></td><td class="numeric">${won(t.fee, 2)}</td><td class="numeric ${t.realizedPnl > 0 ? 'positive' : t.realizedPnl < 0 ? 'negative' : ''}">${t.side === 'sell' ? signed(t.realizedPnl, 2) : '—'}</td></tr>`).join('');
   $('rule-budget').textContent = won(ledger.initialCapital * state.rules.investmentRatio) + '원';
   $('rule-loss').textContent = '−' + won(ledger.initialCapital * state.rules.lossRatio) + '원 (5%)';
+  renderStrategy(manual, scalp);
   if (document.activeElement !== $('capital-input') && !$('capital-input').dataset.dirty) $('capital-input').value = ledger.initialCapital;
   for (const el of $('capital-form').elements) el.disabled = !state.capitalEditable || busy;
   document.querySelectorAll('[data-capital]').forEach(b => b.classList.toggle('selected', Number(b.dataset.capital) === Number($('capital-input').value)));
@@ -78,12 +82,36 @@ function render() {
   $('run-status').classList.toggle('running', control.running);
   $('run-message').textContent = control.message;
   $('run-button').textContent = control.running ? '신규 진입 일시정지  Ⅱ' : control.startedAt ? '모의매매 재개  →' : '모의매매 시작  →';
-  $('run-button').disabled = busy || disconnected || state.readOnly || control.locked || (!control.running && (!state.feed.ok || Number($('capital-input').value) !== ledger.initialCapital));
+  $('run-button').disabled = busy || disconnected || state.readOnly || control.locked || (!control.running && (!state.feed.ok || Number($('capital-input').value) !== ledger.initialCapital || $('strategy-select').value !== (control.strategy || 'trend')));
   $('close-button').disabled = busy || disconnected || state.readOnly || !state.paper.positions.length || !state.feed.ok;
   $('undo').disabled = busy || disconnected || state.readOnly || !state.manual.trades.length;
   $('fill-form').querySelector('button[type="submit"]').disabled = busy || disconnected || state.readOnly;
   $('events').innerHTML = state.events.length ? [...state.events].reverse().slice(0, 7).map(e => `<div class="event"><time>${date(e.at)} ${clock(e.at)}</time><p>${esc(e.text)}</p></div>`).join('') : '<p class="help">시작 전입니다. 실험을 시작하면 실행 기록이 남습니다.</p>';
   renderConnection(); renderCountdown(); drawChart();
+}
+
+function renderStrategy(manual, scalp) {
+  const rules = state.rules, control = state.control, select = $('strategy-select');
+  if (!select.dataset.dirty) select.value = control.strategy || 'trend';
+  const editable = !!state.strategies && !state.readOnly && !state.paper.positions.length && !control.locked && !busy && !disconnected;
+  for (const element of $('strategy-form').elements) element.disabled = !editable;
+  $('strategy-title').textContent = (rules.name || '추세 관찰') + ' · 모의';
+  $('strategy-help').textContent = state.paper.positions.length ? '모의 보유분을 정리하면 전략을 변경할 수 있습니다.' : control.locked ? '종료된 실험의 기록을 보존합니다.' : '적용 후 시작·재개를 누르세요. 기존 거래·남은 시간·원금은 유지됩니다.';
+  $('strategy-description').textContent = scalp ? '1분봉 거래량 증가와 고점 돌파를 포착합니다. 잦은 매매의 비용과 손실을 함께 기록합니다.' : '이동평균과 5분 상승률을 사용하는 추세 규칙입니다. 수익 안정성이 검증된 전략은 아닙니다.';
+  $('rule-exit').textContent = `−${won(rules.stopLoss * 100, 1)}% / +${won(rules.takeProfit * 100, 1)}%`;
+  $('rule-trailing').textContent = scalp ? '+0.6%부터 · 고점 −0.3%p' : '사용 안 함';
+  $('rule-timing').textContent = `${rules.maxHoldMs / 60000}분 / ${rules.cooldownMs / 60000}분`;
+  $('rule-entries').textContent = `최대 ${rules.maxEntriesPerDay}회 · KST`;
+  $('strategy-conditions').textContent = scalp ? '연속 마감 1분봉 16개가 필요합니다. 직전 5분 고점보다 0.01% 이상 높은 종가, 직전 10분 평균 대비 거래량 1.3배, 3분 상승 0.15~2.5%, 최근 1분 상승 0.05% 이상, 캔들 상단 35% 마감, 3봉 평균 > 10봉 평균이 진입 조건입니다. 호가 간격 0.12%, 예상 왕복 비용 0.35%를 넘으면 대기합니다. 신호 뒤 0.4% 넘게 오른 가격은 추격하지 않습니다.' : '마감 1분봉 25개가 연속으로 있어야 합니다. 5봉 평균이 20봉 평균보다 0.03% 이상 높고, 최근 5분 상승률이 0.08~0.8%이며, 호가 간격이 0.15% 이하일 때 진입합니다.';
+  $('performance-panel').hidden = manual || !state.performance;
+  $('performance-cards').innerHTML = (state.performance || []).map(p => `<article><strong>${esc(p.name)}</strong><div class="performance-pnl ${p.netPnl > 0 ? 'positive' : p.netPnl < 0 ? 'negative' : ''}">${signed(p.netPnl, 2)}원</div><p>청산 ${p.closed}회 · 승률 ${p.winRate === null ? '—' : won(p.winRate * 100, 1) + '%'}</p><p>평균 순손익 ${p.averageNet === null ? '—' : signed(p.averageNet, 2) + '원'}<br>누적 수수료 ${won(p.fees, 2)}원</p></article>`).join('');
+  $('feedback-panel').hidden = manual || !state.feedback;
+  const feedback = state.feedback;
+  if (feedback) {
+    $('feedback-summary').textContent = !scalp ? '단타 모드에서 적용됩니다. 아래 기록은 기존 단타 청산 결과입니다.' : feedback.paused ? `3회 연속 손실 · 신규 진입 ${Math.max(0, Math.ceil((feedback.pauseUntil - state.now) / 60000))}분 대기` : `단타 청산 ${feedback.samples}회 반영 · 종목별 3회부터 후보 점수를 조정합니다.`;
+    const records = Object.values(feedback.markets);
+    $('feedback-markets').innerHTML = records.length ? records.map(f => `<div><strong>${esc(f.market.slice(4))}</strong><span>×${won(f.multiplier, 2)} · ${f.samples}회${f.paused ? ' · ' + Math.ceil((f.cooldownUntil - state.now) / 60000) + '분 대기' : ''}</span></div>`).join('') : '<p class="help">완료된 단타 기록이 없습니다. 아직 점수 보정은 적용되지 않았습니다.</p>';
+  }
 }
 
 function renderDirectory() {
@@ -200,6 +228,13 @@ document.querySelectorAll('[data-capital]').forEach(button => button.addEventLis
 $('capital-form').addEventListener('submit', async e => {
   e.preventDefault(); const capital = Number($('capital-input').value);
   if (await post('/api/capital', { capital })) { delete $('capital-input').dataset.dirty; render(); toast(`실험 원금을 ${won(capital)}원으로 설정했습니다.`); }
+});
+$('strategy-select').addEventListener('change', () => { $('strategy-select').dataset.dirty = 'true'; render(); });
+$('strategy-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (await post('/api/strategy', { strategy: $('strategy-select').value })) {
+    delete $('strategy-select').dataset.dirty; render(); toast('전략을 적용했습니다. 모의매매 시작·재개를 눌러 실행하세요.');
+  }
 });
 function renderFormEstimate() {
   const fields = $('fill-form').elements;

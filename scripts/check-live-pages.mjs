@@ -21,7 +21,10 @@ try {
   assert.equal(snapshot.paper.trades.length, 0);
   assert.equal(snapshot.manual.trades.length, 0);
   assert.equal(snapshot.control.running, false);
+  assert.equal(snapshot.control.strategy, 'scalp');
+  assert.equal(snapshot.feedback.samples, 0);
   assert.ok(snapshot.feed.ok);
   assert.ok(Object.values(runtime.candles).some(rows => rows.some(c => c.type === 'candle.1m')), 'WebSocket one-minute candle messages received');
-  console.log(JSON.stringify({ ok: true, elapsedSeconds: Math.round((Date.now() - startedAt) / 1000), mode: 'read-only integration check', universe: { total: snapshot.universe.total, selected: snapshot.universe.selected, excluded: snapshot.universe.excluded }, markets: snapshot.markets.map(m => ({ market: m.code, price: m.quote.price, spreadPct: m.quote.spread * 100, signalReady: m.signal.ready, signal: m.signal.reason })) }, null, 2));
+  runtime.tick();
+  console.log(JSON.stringify({ ok: true, elapsedSeconds: Math.round((Date.now() - startedAt) / 1000), mode: 'read-only integration check', strategy: snapshot.control.strategy, feedbackSamples: snapshot.feedback.samples, universe: { total: snapshot.universe.total, selected: snapshot.universe.selected, excluded: snapshot.universe.excluded }, markets: runtime.snapshot().markets.map(m => ({ market: m.code, price: m.quote.price, spreadPct: m.quote.spread * 100, signalReady: m.signal.ready, volumeRatio: m.signal.volumeRatio, signal: m.signal.reason })) }, null, 2));
 } finally { events.get('pagehide')?.(); }

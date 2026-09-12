@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
-import { MARKETS, RULES, newState, newLedger, addEvent, signalFromCandles, recordFill, valuation, advancePaper, closePaper, isFresh } from './engine.mjs';
+import { MARKETS, RULES, STRATEGIES, activeRules, strategyPerformance, setStrategy, newState, newLedger, addEvent, signalFromCandles, recordFill, valuation, advancePaper, closePaper, isFresh } from './engine.mjs';
+import { adaptiveFeedback } from './strategies.mjs';
+import { tradesCsv } from './pages-state.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.LAB_DATA_DIR ? path.resolve(process.env.LAB_DATA_DIR) : path.join(ROOT, 'data');
@@ -85,7 +87,7 @@ async function refresh() {
       for (const m of MARKETS) {
         try {
           const candles = await publicApi('/candles/minutes/1?market=' + m.code + '&count=45');
-          signals[m.code] = signalFromCandles(candles, marketNow());
+          signals[m.code] = signalFromCandles(candles, marketNow(), state.control.strategy);
         } catch (error) {
           signals[m.code] = { ready: false, entry: false, reason: '캔들 조회 실패 · 다음 갱신 대기' };
         }
@@ -119,7 +121,7 @@ async function refresh() {
 function snapshot() {
   const now = marketNow();
   return {
-    app: '만원 실험실', version: '1.0.0', now, token, rules: RULES,
+    app: '만원 실험실', version: '1.3.0', now, token, rules: activeRules(state), strategies: Object.values(STRATEGIES), performance: strategyPerformance(state.paper), feedback: adaptiveFeedback(state.paper.trades, now),
     capitalEditable: !state.capitalLocked && !state.control.startedAt && !state.paper.trades.length && !state.manual.trades.length,
     feed: { ok: !feedError && lastSuccess !== null && now - lastSuccess < 30_000 && MARKETS.every(m => isFresh(quotes[m.code], now)), lastSuccess, error: feedError, storageError, refreshing, clockOffsetMs: exchangeOffsetMs },
     markets: MARKETS.map(m => ({ ...m, quote: quotes[m.code] ? { ...quotes[m.code], levels: undefined } : null, signal: signals[m.code] ?? { ready: false, entry: false, reason: '시세 연결 중' } })),
@@ -146,11 +148,6 @@ function mutate(fn) {
   try { fn(); save(); }
   catch (error) { state = before; throw error; }
 }
-function csvCell(value) {
-  let text = String(value ?? '');
-  if (/^[=+@\t\r]/.test(text) || (text.startsWith('-') && !Number.isFinite(Number(text)))) text = "'" + text;
-  return '"' + text.replaceAll('"', '""') + '"';
-}
 const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
 const server = http.createServer(async (req, res) => {
   try {
@@ -160,10 +157,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, snapshot());
     if (req.method === 'GET' && url.pathname === '/api/export') {
       const mode = url.searchParams.get('mode') === 'manual' ? 'manual' : 'paper';
-      const header = ['구분', '기록시각', '종목', '매매', '수량', '체결가', '거래금액', '수수료', '실현손익', '체결ID', '설명'];
-      const rows = state[mode].trades.map(t => [mode === 'manual' ? '사용자 입력 실거래' : '모의거래', new Date(t.at).toISOString(), t.market, t.side, t.quantity, t.price, t.notional, t.fee, t.realizedPnl, t.reference, t.reason]);
       res.writeHead(200, { ...securityHeaders, 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="manwon-${mode}.csv"` });
-      return res.end('\uFEFF' + [header, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n'));
+      return res.end(tradesCsv(state[mode], mode));
     }
     if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
       const origin = req.headers.origin;
@@ -180,6 +175,9 @@ const server = http.createServer(async (req, res) => {
           state.observations = [{ at: now, paper: capital, manual: capital }];
           addEvent(state, `실험 원금 ${capital.toLocaleString('ko-KR')}원으로 설정`, now);
         });
+      } else if (url.pathname === '/api/strategy') {
+        mutate(() => setStrategy(state, body.strategy, now));
+        signals = {}; lastCandleFetch = 0;
       } else if (url.pathname === '/api/control') {
         mutate(() => {
           if (body.action === 'start') {
